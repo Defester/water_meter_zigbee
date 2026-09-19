@@ -1,0 +1,18 @@
+{
+  "idf.customExtraVars": {
+    "OPENOCD_USB_ADAPTER_LOCATION": "1-2",
+    "IDF_TARGET": "esp32h2"
+  },
+  "idf.currentSetup": "C:\\esp\\v6.0.1\\esp-idf",
+  "idf.flashType": "JTAG",
+  "idf.portWin": "COM3",
+  "idf.openOcdConfigs": [
+    "board/esp32h2-builtin.cfg"
+  ],
+  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\esp-20.1.1_20250829\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=c:\\Users\\gamar\\esp_projects\\water_meter_zigbee\\build"
+  ]
+}

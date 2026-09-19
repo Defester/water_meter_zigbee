@@ -1,0 +1,50 @@
+menu "Water meter"
+
+    config WATER_COLD_GPIO
+        int "Cold water (HVS) reed switch GPIO"
+        default 1
+        help
+            Reed switch shorts this pin to GND. Internal pull-up is enabled.
+
+    config WATER_HOT_GPIO
+        int "Hot water (GVS) reed switch GPIO"
+        default 2
+        help
+            Reed switch shorts this pin to GND. Internal pull-up is enabled.
+
+    config WATER_LITERS_PER_PULSE
+        int "Liters per pulse"
+        default 10
+        range 1 1000
+
+    config WATER_DEBOUNCE_MS
+        int "Debounce time per channel (ms)"
+        default 30
+        range 5 1000
+
+    config WATER_NVS_SAVE_EVERY_PULSES
+        int "Save counters to NVS every N pulses"
+        default 5
+        range 1 1000
+
+    config WATER_NVS_SAVE_PERIOD_S
+        int "Save unsaved counters to NVS at least every N seconds"
+        default 300
+        range 10 86400
+
+    config WATER_REPORT_MAX_INTERVAL_S
+        int "Zigbee reporting max interval (heartbeat, s)"
+        default 900
+        range 60 65534
+
+    config WATER_INITIAL_COLD_LITERS
+        int "Initial cold water reading (liters), used only while NVS is empty"
+        default 0
+        range 0 2147483647
+
+    config WATER_INITIAL_HOT_LITERS
+        int "Initial hot water reading (liters), used only while NVS is empty"
+        default 0
+        range 0 2147483647
+
+endmenu

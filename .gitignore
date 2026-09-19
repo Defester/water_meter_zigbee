@@ -1,0 +1,14 @@
+# Build artifacts
+build/
+*.log
+
+# ESP-IDF managed components (downloaded by idf.py, not source)
+managed_components/
+
+# Machine-generated sdkconfig (keep sdkconfig.defaults as the source of truth)
+sdkconfig
+sdkconfig.old
+
+# VS Code local settings (keep .clangd, it's project-shared)
+.vscode/*
+!.vscode/settings.json
