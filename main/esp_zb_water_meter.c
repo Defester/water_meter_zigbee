@@ -169,19 +169,36 @@ static void button_task(void *pvParameters)
     };
     ESP_ERROR_CHECK(gpio_config(&cfg));
 
-    int held_ms = 0;
+    /*
+     * Hold time is measured against the real clock instead of counting 50 ms loop
+     * iterations: a delayed iteration (flash write, Zigbee lock contention) would
+     * otherwise let the counter step over the trigger value and never match it.
+     */
+    int64_t pressed_since_us = 0; /* 0 = button released */
+    bool reset_done = false;      /* one-shot guard for the current press */
+
     while (true) {
         if (gpio_get_level(WATER_BUTTON_GPIO) == 0) {
-            held_ms += 50;
-            if (held_ms == WATER_FACTORY_RESET_HOLD_MS) {
-                ESP_LOGW(TAG, "BOOT held %d ms: Zigbee factory reset (water counters are kept)", held_ms);
-                counters_save();
-                esp_zb_lock_acquire(portMAX_DELAY);
-                esp_zb_factory_reset();
-                esp_zb_lock_release();
+            int64_t now = esp_timer_get_time();
+            if (pressed_since_us == 0) {
+                pressed_since_us = now;
+            }
+            if (!reset_done && (now - pressed_since_us) >= (int64_t)WATER_FACTORY_RESET_HOLD_MS * 1000LL) {
+                reset_done = true;
+                if (s_zb_ready) {
+                    ESP_LOGW(TAG, "BOOT held %d ms: Zigbee factory reset (water counters are kept)",
+                             WATER_FACTORY_RESET_HOLD_MS);
+                    counters_save();
+                    esp_zb_lock_acquire(portMAX_DELAY);
+                    esp_zb_factory_reset();
+                    esp_zb_lock_release();
+                } else {
+                    ESP_LOGW(TAG, "BOOT held, but the Zigbee stack is not up yet: factory reset skipped");
+                }
             }
         } else {
-            held_ms = 0;
+            pressed_since_us = 0;
+            reset_done = false;
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
