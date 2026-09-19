@@ -41,7 +41,8 @@ static uint32_t s_unsaved_pulses;              /* pulses since the last NVS save
 static int64_t s_last_save_us;
 static SemaphoreHandle_t s_counter_mutex;
 static QueueHandle_t s_pulse_queue;
-static volatile bool s_zb_ready; /* Zigbee stack started, attributes can be touched */
+static volatile bool s_zb_ready;         /* commissioning done, attributes can be touched */
+static volatile bool s_zb_stack_running; /* stack main loop is alive (any signal received) */
 
 static esp_zb_uint48_t to_u48(uint64_t v)
 {
@@ -185,7 +186,12 @@ static void button_task(void *pvParameters)
             }
             if (!reset_done && (now - pressed_since_us) >= (int64_t)WATER_FACTORY_RESET_HOLD_MS * 1000LL) {
                 reset_done = true;
-                if (s_zb_ready) {
+                /*
+                 * Gate on the stack main loop being alive, not on commissioning having
+                 * succeeded: a device stuck retrying a rejoin is exactly when the user
+                 * needs the reset, and taking the Zigbee lock is safe by then.
+                 */
+                if (s_zb_stack_running) {
                     ESP_LOGW(TAG, "BOOT held %d ms: Zigbee factory reset (water counters are kept)",
                              WATER_FACTORY_RESET_HOLD_MS);
                     counters_save();
@@ -193,7 +199,7 @@ static void button_task(void *pvParameters)
                     esp_zb_factory_reset();
                     esp_zb_lock_release();
                 } else {
-                    ESP_LOGW(TAG, "BOOT held, but the Zigbee stack is not up yet: factory reset skipped");
+                    ESP_LOGW(TAG, "BOOT held, but the Zigbee stack has not started yet: factory reset skipped");
                 }
             }
         } else {
@@ -213,11 +219,18 @@ static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
     ESP_RETURN_ON_FALSE(esp_zb_bdb_start_top_level_commissioning(mode_mask) == ESP_OK, , TAG, "Failed to start Zigbee commissioning");
 }
 
+/* Consecutive failures of a rejoin attempt after reboot (see the handler below) */
+#define WATER_REJOIN_ATTEMPTS_BEFORE_STEERING 5
+
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
     uint32_t *p_sg_p = signal_struct->p_app_signal;
     esp_err_t err_status = signal_struct->esp_err_status;
     esp_zb_app_signal_type_t sig_type = *p_sg_p;
+    static uint32_t s_rejoin_failures;
+
+    /* any signal proves the stack main loop is running and its lock can be taken */
+    s_zb_stack_running = true;
 
     switch (sig_type) {
     case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
@@ -230,6 +243,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             ESP_LOGI(TAG, "Device started up in %s factory-reset mode", esp_zb_bdb_is_factory_new() ? "" : "non");
             /* stack is up: from now on pulses update the attributes; push what was counted so far */
             s_zb_ready = true;
+            s_rejoin_failures = 0;
             if (esp_zb_bdb_is_factory_new()) {
                 zb_publish_all(false);
                 ESP_LOGI(TAG, "Start network steering (enable Permit Join in Zigbee2MQTT)");
@@ -239,9 +253,25 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 zb_publish_all(true);
             }
         } else {
-            /* e.g. parent unreachable on rejoin: counting keeps working locally, retry the stack start */
-            ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status: %s), retrying", esp_err_to_name(err_status));
-            esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, ESP_ZB_BDB_MODE_INITIALIZATION, 3000);
+            /*
+             * Parent unreachable, coordinator down, or the device was removed from the
+             * network in Z2M: counting keeps working locally. Retrying INITIALIZATION
+             * alone can never recover the last case, so fall back to steering after a
+             * few attempts instead of looping on a rejoin that will always fail.
+             */
+            s_rejoin_failures++;
+            if (s_rejoin_failures < WATER_REJOIN_ATTEMPTS_BEFORE_STEERING) {
+                ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status: %s), rejoin attempt %lu of %d",
+                         esp_err_to_name(err_status), (unsigned long)s_rejoin_failures,
+                         WATER_REJOIN_ATTEMPTS_BEFORE_STEERING);
+                esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb,
+                                       ESP_ZB_BDB_MODE_INITIALIZATION, 3000);
+            } else {
+                ESP_LOGW(TAG, "Rejoin failed %lu times, falling back to network steering",
+                         (unsigned long)s_rejoin_failures);
+                esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb,
+                                       ESP_ZB_BDB_MODE_NETWORK_STEERING, 3000);
+            }
         }
         break;
     case ESP_ZB_BDB_SIGNAL_STEERING:
@@ -252,6 +282,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                      extended_pan_id[7], extended_pan_id[6], extended_pan_id[5], extended_pan_id[4],
                      extended_pan_id[3], extended_pan_id[2], extended_pan_id[1], extended_pan_id[0],
                      esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
+            /* also covers joining through the rejoin fallback, where no successful
+             * DEVICE_REBOOT signal ever arrived to raise the flag */
+            s_zb_ready = true;
+            s_rejoin_failures = 0;
             zb_publish_all(true);
         } else {
             ESP_LOGI(TAG, "Network steering was not successful (status: %s)", esp_err_to_name(err_status));
