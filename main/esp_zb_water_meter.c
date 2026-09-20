@@ -62,6 +62,23 @@ static uint64_t counter_get(int ch)
     return v;
 }
 
+static void counter_set(int ch, uint64_t liters)
+{
+    xSemaphoreTake(s_counter_mutex, portMAX_DELAY);
+    s_liters[ch] = liters;
+    xSemaphoreGive(s_counter_mutex);
+}
+
+static int channel_from_endpoint(uint8_t ep)
+{
+    for (int ch = 0; ch < WATER_CHANNEL_COUNT; ch++) {
+        if (WATER_ENDPOINT(ch) == ep) {
+            return ch;
+        }
+    }
+    return -1;
+}
+
 /* Persist counters to NVS. Also used as shutdown handler, so it must not block forever. */
 static void counters_save(void)
 {
@@ -343,8 +360,15 @@ static void add_water_meter_endpoint(esp_zb_ep_list_t *ep_list, int ch)
     const uint8_t ro = ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY;
     const uint16_t mc = ESP_ZB_ZCL_CLUSTER_ID_METERING;
 
+    /*
+     * Writable on purpose (the ZCL spec has it read-only): a freshly installed
+     * mechanical meter already shows the volume used to calibrate and test it, and
+     * that reading has to be transferred into this counter without a reflash.
+     */
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_CURRENT_SUMMATION_DELIVERED_ID,
-                                            ESP_ZB_ZCL_ATTR_TYPE_U48, ro | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &summation));
+                                            ESP_ZB_ZCL_ATTR_TYPE_U48,
+                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
+                                            &summation));
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_STATUS_ID,
                                             ESP_ZB_ZCL_ATTR_TYPE_8BITMAP, ro, &status));
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_UNIT_OF_MEASURE_ID,
@@ -391,10 +415,46 @@ static void setup_default_reporting(int ch)
     }
 }
 
+/*
+ * A write of CurrentSummationDelivered syncs this counter with the reading printed
+ * on the mechanical meter, so a replacement meter that arrives with a non-zero
+ * calibration volume can be matched from Home Assistant without reflashing.
+ * The stack has already stored the new value in the attribute; mirror it into the
+ * counter and persist it right away, so a power cut cannot lose the entered value.
+ */
+static esp_err_t zb_handle_attr_write(const esp_zb_zcl_set_attr_value_message_t *msg)
+{
+    ESP_RETURN_ON_FALSE(msg, ESP_ERR_INVALID_ARG, TAG, "empty set-attribute message");
+    ESP_RETURN_ON_FALSE(msg->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG,
+                        "set-attribute failed, status 0x%x", msg->info.status);
+
+    if (msg->info.cluster != ESP_ZB_ZCL_CLUSTER_ID_METERING ||
+        msg->attribute.id != ESP_ZB_ZCL_ATTR_METERING_CURRENT_SUMMATION_DELIVERED_ID) {
+        return ESP_OK;
+    }
+
+    int ch = channel_from_endpoint(msg->info.dst_endpoint);
+    if (ch < 0 || msg->attribute.data.type != ESP_ZB_ZCL_ATTR_TYPE_U48 || msg->attribute.data.value == NULL) {
+        ESP_LOGW(TAG, "EP%d: ignoring summation write (type 0x%x)", msg->info.dst_endpoint,
+                 msg->attribute.data.type);
+        return ESP_OK;
+    }
+
+    const esp_zb_uint48_t *v = (const esp_zb_uint48_t *)msg->attribute.data.value;
+    uint64_t liters = ((uint64_t)v->high << 32) | v->low;
+
+    counter_set(ch, liters);
+    ESP_LOGW(TAG, "%s counter set over Zigbee to %llu L (%llu.%03llu m3)", ch == WATER_CH_COLD ? "Cold" : "Hot",
+             liters, liters / 1000, liters % 1000);
+    counters_save();
+    return ESP_OK;
+}
+
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
 {
     switch (callback_id) {
     case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
+        return zb_handle_attr_write((const esp_zb_zcl_set_attr_value_message_t *)message);
     case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:
         break;
     default:
