@@ -376,18 +376,6 @@ static void add_water_meter_endpoint(esp_zb_ep_list_t *ep_list, int ch)
 
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_CURRENT_SUMMATION_DELIVERED_ID,
                                             ESP_ZB_ZCL_ATTR_TYPE_U48, ro | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &summation));
-    /*
-     * Non-standard attribute, receive-only in practice: a freshly installed mechanical
-     * meter already shows the volume used to calibrate and test it, and that reading has
-     * to reach this counter without a reflash. CurrentSummationDelivered itself cannot be
-     * made writable - the ZBOSS ZCL layer answers a write with NOT_AUTHORIZED regardless
-     * of its access flags (confirmed on hardware), so this separate attribute in the
-     * manufacturer-extension range carries the value instead; zb_handle_attr_write() below
-     * picks it up and copies it into the real counter.
-     */
-    s_set_volume_attr[ch] = summation;
-    ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, WATER_ATTR_SET_VOLUME_ID, ESP_ZB_ZCL_ATTR_TYPE_U48,
-                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &s_set_volume_attr[ch]));
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_STATUS_ID,
                                             ESP_ZB_ZCL_ATTR_TYPE_8BITMAP, ro, &status));
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_UNIT_OF_MEASURE_ID,
@@ -401,6 +389,25 @@ static void add_water_meter_endpoint(esp_zb_ep_list_t *ep_list, int ch)
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_METERING_DEVICE_TYPE_ID,
                                             ESP_ZB_ZCL_ATTR_TYPE_8BITMAP, ro, &device_type));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_metering_cluster(cluster_list, metering, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+
+    /*
+     * Calibration, in a private cluster of its own - receive-only in practice: a freshly
+     * installed mechanical meter already shows the volume used to calibrate and test it,
+     * and that reading has to reach the real counter without a reflash.
+     * Putting this attribute inside the Metering cluster (0x0702) does not work: ZBOSS
+     * answers ANY Write Attribute request targeting that cluster with NOT_AUTHORIZED,
+     * confirmed on hardware for both the standard CurrentSummationDelivered attribute and
+     * a custom one added alongside it - the restriction is per-cluster, not per-attribute,
+     * most likely a blanket anti-tamper rule for the whole Smart Energy metering cluster.
+     * A cluster ID outside the ZCL-defined range (0xFC00-0xFFFF is reserved for
+     * manufacturer-specific clusters) carries no such restriction.
+     */
+    esp_zb_attribute_list_t *calib = esp_zb_zcl_attr_list_create(WATER_CLUSTER_CALIBRATION_ID);
+    s_set_volume_attr[ch] = summation;
+    ESP_ERROR_CHECK(esp_zb_cluster_add_attr(calib, WATER_CLUSTER_CALIBRATION_ID, WATER_ATTR_SET_VOLUME_ID,
+                                            ESP_ZB_ZCL_ATTR_TYPE_U48, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE,
+                                            &s_set_volume_attr[ch]));
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_custom_cluster(cluster_list, calib, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
 
     esp_zb_endpoint_config_t ep_cfg = {
         .endpoint = ep,
@@ -448,7 +455,7 @@ static esp_err_t zb_handle_attr_write(const esp_zb_zcl_set_attr_value_message_t 
     ESP_RETURN_ON_FALSE(msg->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG,
                         "set-attribute failed, status 0x%x", msg->info.status);
 
-    if (msg->info.cluster != ESP_ZB_ZCL_CLUSTER_ID_METERING || msg->attribute.id != WATER_ATTR_SET_VOLUME_ID) {
+    if (msg->info.cluster != WATER_CLUSTER_CALIBRATION_ID || msg->attribute.id != WATER_ATTR_SET_VOLUME_ID) {
         return ESP_OK;
     }
 

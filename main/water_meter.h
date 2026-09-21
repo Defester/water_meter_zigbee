@@ -33,14 +33,16 @@
 #define WATER_SUMMATION_FORMAT  ((6 << 3) | 3)
 
 /*
- * CurrentSummationDelivered cannot be made writable: the ZBOSS ZCL layer rejects a
- * Write Attribute request for it with NOT_AUTHORIZED regardless of the access flags
- * passed at registration (confirmed on hardware), most likely a deliberate anti-tamper
- * rule for Smart Energy metering data. A separate, non-standard attribute in the
- * manufacturer-extension range (0xF000-0xFFFE, ZCL8) is used instead to receive the
- * calibration volume from Home Assistant / Zigbee2MQTT.
+ * Writing to the Metering cluster (0x0702) is rejected outright by ZBOSS with
+ * NOT_AUTHORIZED - confirmed on hardware for both the standard CurrentSummationDelivered
+ * attribute and a custom one added inside the same cluster, so the restriction is
+ * per-cluster, not per-attribute. The calibration value (the reading on a freshly
+ * installed meter's dial, used to sync the counter without a reflash) is carried instead
+ * by one attribute in a private cluster of its own, using a cluster ID from the
+ * manufacturer-specific range (0xFC00-0xFFFF, reserved by the ZCL spec for exactly this).
  */
-#define WATER_ATTR_SET_VOLUME_ID 0xF000
+#define WATER_CLUSTER_CALIBRATION_ID 0xFC00
+#define WATER_ATTR_SET_VOLUME_ID     0x0000
 
 /* Zigbee configuration */
 #define INSTALLCODE_POLICY_ENABLE   false
