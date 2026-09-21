@@ -393,14 +393,13 @@ static void add_water_meter_endpoint(esp_zb_ep_list_t *ep_list, int ch)
     /*
      * Calibration, in a private cluster of its own - receive-only in practice: a freshly
      * installed mechanical meter already shows the volume used to calibrate and test it,
-     * and that reading has to reach the real counter without a reflash.
-     * Putting this attribute inside the Metering cluster (0x0702) does not work: ZBOSS
-     * answers ANY Write Attribute request targeting that cluster with NOT_AUTHORIZED,
-     * confirmed on hardware for both the standard CurrentSummationDelivered attribute and
-     * a custom one added alongside it - the restriction is per-cluster, not per-attribute,
-     * most likely a blanket anti-tamper rule for the whole Smart Energy metering cluster.
-     * A cluster ID outside the ZCL-defined range (0xFC00-0xFFFF is reserved for
-     * manufacturer-specific clusters) carries no such restriction.
+     * and that reading has to reach the real counter without a reflash. That is a
+     * vendor-specific action and CurrentSummationDelivered is read-only by spec, so it
+     * gets a cluster from the manufacturer-specific range (0xFC00-0xFFFF) instead of
+     * bending a standard metering attribute. The client must declare the attribute
+     * writable on its side too; in Zigbee2MQTT that is "write: true" on the matching
+     * custom cluster definition, without which it refuses the write locally and never
+     * transmits anything.
      */
     esp_zb_attribute_list_t *calib = esp_zb_zcl_attr_list_create(WATER_CLUSTER_CALIBRATION_ID);
     s_set_volume_attr[ch] = summation;

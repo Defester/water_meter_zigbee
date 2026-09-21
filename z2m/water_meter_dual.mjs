@@ -4,14 +4,12 @@
 // The firmware reports CurrentSummationDelivered (seMetering 0x0702) in RAW LITERS on
 // endpoint 1 (cold, HVS) and endpoint 2 (hot, GVS); "scale: 1000" turns it into m3.
 //
-// Writing to seMetering itself is rejected outright: ZBOSS answers ANY Write Attribute
-// request targeting that cluster with NOT_AUTHORIZED, confirmed on hardware for both the
-// standard CurrentSummationDelivered attribute and a custom one added inside the same
-// cluster - the restriction is per-cluster, not per-attribute (an anti-tamper rule baked
-// into the Smart Energy metering cluster implementation). The firmware instead exposes a
-// private cluster of its own (0xFC00, in the ZCL manufacturer-specific cluster range
-// 0xFC00-0xFFFF) with one write-only-in-practice attribute, used only to transfer the
-// calibration reading of a freshly installed mechanical meter into the running counter.
+// CurrentSummationDelivered is read-only, as the ZCL spec defines it. Setting the counter
+// to the reading of a freshly installed mechanical meter (its calibration volume) is a
+// vendor-specific action, so the firmware exposes it through a private cluster of its own
+// (0xFC00, in the ZCL manufacturer-specific cluster range 0xFC00-0xFFFF) holding a single
+// write-only-in-practice attribute, rather than by making a standard, spec-read-only
+// metering attribute writable.
 import {Zcl} from "zigbee-herdsman";
 import * as m from "zigbee-herdsman-converters/lib/modernExtend";
 
@@ -25,7 +23,11 @@ export default {
         m.deviceAddCustomCluster("waterMeterCalibration", {
             ID: 0xfc00,
             attributes: {
-                setVolume: {ID: 0x0000, type: Zcl.DataType.UINT48},
+                // write: true is mandatory - without it zigbee-herdsman refuses the write
+                // locally, before anything is transmitted, with
+                // "Status 'NOT_AUTHORIZED' <name> (<id>) is not writable"
+                // (see processAttributeWrite() in its src/zspec/zcl/utils.ts).
+                setVolume: {ID: 0x0000, type: Zcl.DataType.UINT48, write: true},
             },
             commands: {},
             commandsResponse: {},
