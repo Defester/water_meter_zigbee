@@ -43,6 +43,8 @@ static SemaphoreHandle_t s_counter_mutex;
 static QueueHandle_t s_pulse_queue;
 static volatile bool s_zb_ready;         /* commissioning done, attributes can be touched */
 static volatile bool s_zb_stack_running; /* stack main loop is alive (any signal received) */
+/* backing storage for the write-only calibration attribute, see WATER_ATTR_SET_VOLUME_ID */
+static esp_zb_uint48_t s_set_volume_attr[WATER_CHANNEL_COUNT];
 
 static esp_zb_uint48_t to_u48(uint64_t v)
 {
@@ -104,12 +106,18 @@ static void counters_save(void)
 /* Zigbee attribute update / reporting                                        */
 /* ------------------------------------------------------------------------- */
 
-static void zb_publish(int ch, bool send_report)
+/*
+ * Does the actual set-attribute-and-report work, without touching the Zigbee lock: the
+ * SDK forbids acquiring it from inside a Zigbee callback (the stack already holds it
+ * there), so zb_handle_attr_write() below calls this directly, while zb_publish() wraps
+ * it with the lock for callers running in a FreeRTOS task of their own (pulse_task,
+ * button_task, the signal handler).
+ */
+static void zb_publish_locked(int ch, bool send_report)
 {
     uint8_t ep = WATER_ENDPOINT(ch);
     esp_zb_uint48_t value = to_u48(counter_get(ch));
 
-    esp_zb_lock_acquire(portMAX_DELAY);
     esp_zb_zcl_status_t status = esp_zb_zcl_set_attribute_val(ep, ESP_ZB_ZCL_CLUSTER_ID_METERING, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
                                                               ESP_ZB_ZCL_ATTR_METERING_CURRENT_SUMMATION_DELIVERED_ID, &value, false);
     if (status != ESP_ZB_ZCL_STATUS_SUCCESS) {
@@ -130,6 +138,12 @@ static void zb_publish(int ch, bool send_report)
         };
         esp_zb_zcl_report_attr_cmd_req(&cmd);
     }
+}
+
+static void zb_publish(int ch, bool send_report)
+{
+    esp_zb_lock_acquire(portMAX_DELAY);
+    zb_publish_locked(ch, send_report);
     esp_zb_lock_release();
 }
 
@@ -360,15 +374,20 @@ static void add_water_meter_endpoint(esp_zb_ep_list_t *ep_list, int ch)
     const uint8_t ro = ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY;
     const uint16_t mc = ESP_ZB_ZCL_CLUSTER_ID_METERING;
 
-    /*
-     * Writable on purpose (the ZCL spec has it read-only): a freshly installed
-     * mechanical meter already shows the volume used to calibrate and test it, and
-     * that reading has to be transferred into this counter without a reflash.
-     */
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_CURRENT_SUMMATION_DELIVERED_ID,
-                                            ESP_ZB_ZCL_ATTR_TYPE_U48,
-                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
-                                            &summation));
+                                            ESP_ZB_ZCL_ATTR_TYPE_U48, ro | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &summation));
+    /*
+     * Non-standard attribute, receive-only in practice: a freshly installed mechanical
+     * meter already shows the volume used to calibrate and test it, and that reading has
+     * to reach this counter without a reflash. CurrentSummationDelivered itself cannot be
+     * made writable - the ZBOSS ZCL layer answers a write with NOT_AUTHORIZED regardless
+     * of its access flags (confirmed on hardware), so this separate attribute in the
+     * manufacturer-extension range carries the value instead; zb_handle_attr_write() below
+     * picks it up and copies it into the real counter.
+     */
+    s_set_volume_attr[ch] = summation;
+    ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, WATER_ATTR_SET_VOLUME_ID, ESP_ZB_ZCL_ATTR_TYPE_U48,
+                                            ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &s_set_volume_attr[ch]));
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_STATUS_ID,
                                             ESP_ZB_ZCL_ATTR_TYPE_8BITMAP, ro, &status));
     ESP_ERROR_CHECK(esp_zb_cluster_add_attr(metering, mc, ESP_ZB_ZCL_ATTR_METERING_UNIT_OF_MEASURE_ID,
@@ -416,11 +435,12 @@ static void setup_default_reporting(int ch)
 }
 
 /*
- * A write of CurrentSummationDelivered syncs this counter with the reading printed
- * on the mechanical meter, so a replacement meter that arrives with a non-zero
- * calibration volume can be matched from Home Assistant without reflashing.
- * The stack has already stored the new value in the attribute; mirror it into the
- * counter and persist it right away, so a power cut cannot lose the entered value.
+ * A write of the calibration attribute (WATER_ATTR_SET_VOLUME_ID, not the standard
+ * CurrentSummationDelivered - see the comment at its registration above) syncs this
+ * counter with the reading printed on the mechanical meter, so a replacement meter
+ * that arrives with a non-zero calibration volume can be matched from Home Assistant
+ * without reflashing. The stack has already stored the new value in the attribute;
+ * mirror it into the counter and persist it right away, so a power cut cannot lose it.
  */
 static esp_err_t zb_handle_attr_write(const esp_zb_zcl_set_attr_value_message_t *msg)
 {
@@ -428,14 +448,13 @@ static esp_err_t zb_handle_attr_write(const esp_zb_zcl_set_attr_value_message_t 
     ESP_RETURN_ON_FALSE(msg->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG,
                         "set-attribute failed, status 0x%x", msg->info.status);
 
-    if (msg->info.cluster != ESP_ZB_ZCL_CLUSTER_ID_METERING ||
-        msg->attribute.id != ESP_ZB_ZCL_ATTR_METERING_CURRENT_SUMMATION_DELIVERED_ID) {
+    if (msg->info.cluster != ESP_ZB_ZCL_CLUSTER_ID_METERING || msg->attribute.id != WATER_ATTR_SET_VOLUME_ID) {
         return ESP_OK;
     }
 
     int ch = channel_from_endpoint(msg->info.dst_endpoint);
     if (ch < 0 || msg->attribute.data.type != ESP_ZB_ZCL_ATTR_TYPE_U48 || msg->attribute.data.value == NULL) {
-        ESP_LOGW(TAG, "EP%d: ignoring summation write (type 0x%x)", msg->info.dst_endpoint,
+        ESP_LOGW(TAG, "EP%d: ignoring calibration write (type 0x%x)", msg->info.dst_endpoint,
                  msg->attribute.data.type);
         return ESP_OK;
     }
@@ -447,6 +466,8 @@ static esp_err_t zb_handle_attr_write(const esp_zb_zcl_set_attr_value_message_t 
     ESP_LOGW(TAG, "%s counter set over Zigbee to %llu L (%llu.%03llu m3)", ch == WATER_CH_COLD ? "Cold" : "Hot",
              liters, liters / 1000, liters % 1000);
     counters_save();
+    /* already inside a Zigbee callback, so update+report without taking the lock again */
+    zb_publish_locked(ch, true);
     return ESP_OK;
 }
 

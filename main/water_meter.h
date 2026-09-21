@@ -32,6 +32,16 @@
 #define WATER_DIVISOR           1000
 #define WATER_SUMMATION_FORMAT  ((6 << 3) | 3)
 
+/*
+ * CurrentSummationDelivered cannot be made writable: the ZBOSS ZCL layer rejects a
+ * Write Attribute request for it with NOT_AUTHORIZED regardless of the access flags
+ * passed at registration (confirmed on hardware), most likely a deliberate anti-tamper
+ * rule for Smart Energy metering data. A separate, non-standard attribute in the
+ * manufacturer-extension range (0xF000-0xFFFE, ZCL8) is used instead to receive the
+ * calibration volume from Home Assistant / Zigbee2MQTT.
+ */
+#define WATER_ATTR_SET_VOLUME_ID 0xF000
+
 /* Zigbee configuration */
 #define INSTALLCODE_POLICY_ENABLE   false
 #define ED_AGING_TIMEOUT            ESP_ZB_ED_AGING_TIMEOUT_64MIN
