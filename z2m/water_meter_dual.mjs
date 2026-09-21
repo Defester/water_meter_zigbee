@@ -52,14 +52,16 @@ export default {
             unit: "m³",
             scale: 1000,
             precision: 3,
-            valueMin: 0,
-            valueMax: 999999,
-            valueStep: 0.001,
+            // No valueMin/valueMax on purpose: declaring both makes the Z2M frontend render
+            // a slider instead of an input box, and a slider spanning a million steps both
+            // fires a write per intermediate value while dragging and, on release, sent a
+            // payload the backend rejected with
+            // "'calibrate_volume' is not a number, got object (undefined)".
+            // A meter reading is typed in, not dragged to.
+            //
             // STATE_SET rather than a write-only SET: a settable field that also carries a
             // state is the ordinary, well-trodden path in Z2M, and the attribute is
-            // readable on the device anyway. Write-only exposes made the frontend send the
-            // bare property name with an object value ("'calibrate_volume' is not a number,
-            // got object"), instead of the per-endpoint calibrate_volume_cold/_hot keys.
+            // readable on the device anyway.
             access: "STATE_SET",
             endpointNames: ["cold", "hot"],
         }),
