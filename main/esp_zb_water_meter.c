@@ -173,7 +173,15 @@ static void pulse_task(void *pvParameters)
             ESP_LOGI(TAG, "%s pulse: total %llu L (%llu.%03llu m3)", ch == WATER_CH_COLD ? "Cold" : "Hot", total, total / 1000,
                      total % 1000);
 
-            if (s_zb_ready) {
+            /*
+             * Gated on the stack being alive, not on commissioning bookkeeping: writing
+             * the attribute is a local operation, and the report inside is already gated
+             * on esp_zb_bdb_dev_joined(). Waiting for our own "commissioned" flag meant a
+             * device whose rejoin signal had failed kept counting locally while its
+             * attribute stayed frozen at the value it held at boot, even though the stack
+             * was on the network and perfectly able to report.
+             */
+            if (s_zb_stack_running) {
                 zb_publish(ch, true);
             }
             if (unsaved >= CONFIG_WATER_NVS_SAVE_EVERY_PULSES) {
@@ -287,17 +295,32 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 ESP_LOGI(TAG, "Device rebooted, rejoined the network");
                 zb_publish_all(true);
             }
+        } else if (esp_zb_bdb_dev_joined()) {
+            /*
+             * The signal failed but the stack says the device is on a network, so the
+             * failure is about this commissioning request, not about connectivity. That
+             * happens because each retry asks an already-commissioned stack to commission
+             * again: the request is refused, which produces another failed signal, which
+             * schedules another retry - a loop of our own making that could never end and
+             * was observed running for minutes while Zigbee2MQTT had the device online.
+             * Trust the stack over the signal, and stop retrying.
+             */
+            ESP_LOGI(TAG, "Commissioning request failed (status: %s) but the device is on a network, continuing",
+                     esp_err_to_name(err_status));
+            s_zb_ready = true;
+            s_rejoin_failures = 0;
+            zb_publish_all(true);
         } else {
             /*
-             * Parent unreachable, coordinator down, or the device was removed from the
-             * network in Z2M: counting keeps working locally either way, so retrying
-             * forever is harmless. Rejoins do come good on their own - one took five
-             * attempts, another succeeded on the first - so the retries matter more than
-             * what follows them. Switching to steering afterwards is a guess and has not
-             * been seen to behave differently: every attempt after the switch came back
-             * through this same branch rather than through the steering signal, so for an
-             * already-commissioned device the two modes may well amount to the same retry.
-             * The proven way out of a truly dead binding is still the BOOT button.
+             * Genuinely off the network: parent unreachable, coordinator down, or the
+             * device was removed from it in Z2M. Counting keeps working locally either
+             * way, so retrying forever is harmless. Rejoins do come good on their own -
+             * one took five attempts, another succeeded on the first - so the retries
+             * matter more than what follows them. Switching to steering afterwards is a
+             * guess and has not been seen to behave differently: every attempt after the
+             * switch came back through this same branch rather than through the steering
+             * signal, so for an already-commissioned device the two modes may well amount
+             * to the same retry. The proven way out of a dead binding is the BOOT button.
              */
             s_rejoin_failures++;
             if (s_rejoin_failures < WATER_REJOIN_ATTEMPTS_BEFORE_STEERING) {
