@@ -45,6 +45,9 @@ static volatile bool s_zb_ready;         /* commissioning done, attributes can b
 static volatile bool s_zb_stack_running; /* stack main loop is alive (any signal received) */
 /* backing storage for the write-only calibration attribute, see WATER_ATTR_SET_VOLUME_ID */
 static esp_zb_uint48_t s_set_volume_attr[WATER_CHANNEL_COUNT];
+/* per-channel report rate limiting, see zb_publish_locked() */
+static int64_t s_last_report_us[WATER_CHANNEL_COUNT];
+static volatile bool s_report_pending[WATER_CHANNEL_COUNT];
 
 static esp_zb_uint48_t to_u48(uint64_t v)
 {
@@ -124,6 +127,23 @@ static void zb_publish_locked(int ch, bool send_report)
         ESP_LOGW(TAG, "EP%d: set attribute failed, status 0x%02x", ep, status);
     }
     if (send_report && esp_zb_bdb_dev_joined()) {
+        /*
+         * Rate limited per channel. A report per pulse put a burst of unicasts on the air
+         * whenever pulses arrived quickly, and on hardware those bursts came with a flood
+         * of NLME status indications and were followed, within seconds, by the device
+         * dropping off the network. The counter is cumulative, so coalescing loses
+         * nothing: only its newest value ever matters. A skipped report is remembered in
+         * s_report_pending and sent by pulse_task once the window has passed, so a value
+         * cannot sit unreported.
+         */
+        int64_t now = esp_timer_get_time();
+        if ((now - s_last_report_us[ch]) < (int64_t)CONFIG_WATER_MIN_REPORT_INTERVAL_S * 1000000LL) {
+            s_report_pending[ch] = true;
+            return;
+        }
+        s_last_report_us[ch] = now;
+        s_report_pending[ch] = false;
+
         /* one-shot report to the coordinator, works even before Z2M has configured a binding */
         esp_zb_zcl_report_attr_cmd_t cmd = {
             .zcl_basic_cmd = {
@@ -186,6 +206,19 @@ static void pulse_task(void *pvParameters)
             }
             if (unsaved >= CONFIG_WATER_NVS_SAVE_EVERY_PULSES) {
                 counters_save();
+            }
+        }
+
+        /*
+         * Flush a report the rate limiter held back. The queue receive above times out
+         * once a second, so this runs regularly even while no pulses arrive, and the
+         * rate limiter inside zb_publish decides whether the window has actually passed.
+         */
+        if (s_zb_stack_running) {
+            for (int c = 0; c < WATER_CHANNEL_COUNT; c++) {
+                if (s_report_pending[c]) {
+                    zb_publish(c, true);
+                }
             }
         }
 

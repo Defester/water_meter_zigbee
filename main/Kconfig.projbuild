@@ -37,6 +37,16 @@ menu "Water meter"
         default 900
         range 60 65534
 
+    config WATER_MIN_REPORT_INTERVAL_S
+        int "Minimum seconds between Zigbee reports per channel"
+        default 10
+        range 1 3600
+        help
+            Pulses arriving faster than this are coalesced into one report. The counter is
+            cumulative, so only its latest value matters and nothing is lost. Reporting
+            every single pulse floods the radio during a burst; at 10 L per pulse real
+            consumption is minutes apart, so this is invisible in normal use.
+
     config WATER_INITIAL_COLD_LITERS
         int "Initial cold water reading (liters), used only while NVS is empty"
         default 0
