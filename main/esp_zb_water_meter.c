@@ -488,7 +488,13 @@ static void add_water_meter_endpoint(esp_zb_ep_list_t *ep_list, int ch)
     ESP_ERROR_CHECK(esp_zb_ep_list_add_ep(ep_list, cluster_list, ep_cfg));
 }
 
-/* Default reporting configuration: report on change of one pulse, plus a heartbeat */
+/*
+ * Default reporting configuration: report on change of one pulse, plus a heartbeat.
+ * The minimum interval matches the rate limit in zb_publish_locked() on purpose. These
+ * are two independent senders - the stack's own reporting engine fires off the attribute
+ * value changing, the other is our explicit report - and throttling only ours still left
+ * the engine free to transmit once a second throughout a burst of pulses.
+ */
 static void setup_default_reporting(int ch)
 {
     esp_zb_zcl_reporting_info_t info = {
@@ -499,9 +505,9 @@ static void setup_default_reporting(int ch)
         .attr_id = ESP_ZB_ZCL_ATTR_METERING_CURRENT_SUMMATION_DELIVERED_ID,
         .manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
         .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .u.send_info.min_interval = 1,
+        .u.send_info.min_interval = CONFIG_WATER_MIN_REPORT_INTERVAL_S,
         .u.send_info.max_interval = CONFIG_WATER_REPORT_MAX_INTERVAL_S,
-        .u.send_info.def_min_interval = 1,
+        .u.send_info.def_min_interval = CONFIG_WATER_MIN_REPORT_INTERVAL_S,
         .u.send_info.def_max_interval = CONFIG_WATER_REPORT_MAX_INTERVAL_S,
         .u.send_info.delta.u48.low = WATER_LITERS_PER_PULSE,
     };
