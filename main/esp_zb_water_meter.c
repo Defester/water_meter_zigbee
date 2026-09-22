@@ -250,8 +250,12 @@ static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
     ESP_RETURN_ON_FALSE(esp_zb_bdb_start_top_level_commissioning(mode_mask) == ESP_OK, , TAG, "Failed to start Zigbee commissioning");
 }
 
-/* Consecutive failures of a rejoin attempt after reboot (see the handler below) */
-#define WATER_REJOIN_ATTEMPTS_BEFORE_STEERING 5
+/*
+ * Consecutive failures of a rejoin attempt after reboot (see the handler below).
+ * A rejoin observed on hardware needed five attempts before it went through, so anything
+ * near that leaves no margin and would give up on a rejoin that was about to work.
+ */
+#define WATER_REJOIN_ATTEMPTS_BEFORE_STEERING 10
 
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
@@ -286,9 +290,14 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         } else {
             /*
              * Parent unreachable, coordinator down, or the device was removed from the
-             * network in Z2M: counting keeps working locally. Retrying INITIALIZATION
-             * alone can never recover the last case, so fall back to steering after a
-             * few attempts instead of looping on a rejoin that will always fail.
+             * network in Z2M: counting keeps working locally either way, so retrying
+             * forever is harmless. Rejoins do come good on their own - one took five
+             * attempts, another succeeded on the first - so the retries matter more than
+             * what follows them. Switching to steering afterwards is a guess and has not
+             * been seen to behave differently: every attempt after the switch came back
+             * through this same branch rather than through the steering signal, so for an
+             * already-commissioned device the two modes may well amount to the same retry.
+             * The proven way out of a truly dead binding is still the BOOT button.
              */
             s_rejoin_failures++;
             if (s_rejoin_failures < WATER_REJOIN_ATTEMPTS_BEFORE_STEERING) {
@@ -298,8 +307,14 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb,
                                        ESP_ZB_BDB_MODE_INITIALIZATION, 3000);
             } else {
-                ESP_LOGW(TAG, "Rejoin failed %lu times, falling back to network steering",
-                         (unsigned long)s_rejoin_failures);
+                /* announce the switch once, then keep the repeats quieter about it */
+                if (s_rejoin_failures == WATER_REJOIN_ATTEMPTS_BEFORE_STEERING) {
+                    ESP_LOGW(TAG, "Rejoin failed %d times, switching to network steering",
+                             WATER_REJOIN_ATTEMPTS_BEFORE_STEERING);
+                } else {
+                    ESP_LOGW(TAG, "Still not on a network after %lu attempts (status: %s)",
+                             (unsigned long)s_rejoin_failures, esp_err_to_name(err_status));
+                }
                 esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb,
                                        ESP_ZB_BDB_MODE_NETWORK_STEERING, 3000);
             }
